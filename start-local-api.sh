@@ -16,13 +16,13 @@ fi
 DATA_DIR="${TGBOTAPI_DATA_DIR:-$SCRIPT_DIR/data/bot-api}"
 mkdir -p "$DATA_DIR"
 
-echo "Starting Telegram Local Bot API on port 8081 ..."
+echo "Starting Telegram Local Bot API on port 8079 ..."
 exec telegram-bot-api \
   --api-id="$TG_API_ID" \
   --api-hash="$TG_API_HASH" \
   --local \
   --dir="$DATA_DIR" \
   --temp-dir="/tmp" \
-  --http-port=8081 \
+  --http-port=8079 \
   --log="$DATA_DIR/bot-api.log" \
   --verbosity=1

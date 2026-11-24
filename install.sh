@@ -403,10 +403,10 @@ configure_env() {
 
   printf '\n  %s▸ Telegram Local Bot API%s\n' "$CYAN" "$RESET"
   ENV_LOCAL_BOT_API=$(ask_env_value "LOCAL_BOT_API - 1 use local server, 0 official API" "${LOCAL_BOT_API:-0}" 0)
-  ENV_TG_LOCAL_SERVER=$(ask_env_value "TG_LOCAL_SERVER - local Bot API URL" "${TG_LOCAL_SERVER:-http://127.0.0.1:8081}" 0)
+  ENV_TG_LOCAL_SERVER=$(ask_env_value "TG_LOCAL_SERVER - local Bot API URL" "${TG_LOCAL_SERVER:-http://127.0.0.1:8079}" 0)
   ENV_TG_API_ID=$(ask_env_value "TG_API_ID - my.telegram.org API ID, blank if unused" "${TG_API_ID:-}" 0)
   ENV_TG_API_HASH=$(ask_env_value "TG_API_HASH - my.telegram.org API hash, blank if unused" "${TG_API_HASH:-}" 0)
-  ENV_TG_LOCAL_PORT=$(ask_env_value "TG_LOCAL_PORT - Docker Compose host port" "${TG_LOCAL_PORT:-8081}" 0)
+  ENV_TG_LOCAL_PORT=$(ask_env_value "TG_LOCAL_PORT - Docker Compose host port" "${TG_LOCAL_PORT:-8079}" 0)
   ENV_TGBOTAPI_DATA_DIR=$(ask_env_value "TGBOTAPI_DATA_DIR - start-local-api.sh data dir, blank = default" "${TGBOTAPI_DATA_DIR:-}" 0)
 
   printf '\n  %s▸ Runtime%s\n' "$CYAN" "$RESET"

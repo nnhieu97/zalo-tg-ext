@@ -107,10 +107,10 @@ test('local Bot API mode requires a valid HTTP URL and trims trailing slashes', 
   const enabled = runConfig({
     ...valid,
     LOCAL_BOT_API: 'true',
-    TG_LOCAL_SERVER: 'http://localhost:8081///',
+    TG_LOCAL_SERVER: 'http://localhost:8079///',
   });
   assert.equal(enabled.status, 0, enabled.stderr);
-  assert.equal(JSON.parse(enabled.stdout).telegram.localServer, 'http://localhost:8081');
+  assert.equal(JSON.parse(enabled.stdout).telegram.localServer, 'http://localhost:8079');
 
   const disabled = runConfig({ ...valid, LOCAL_BOT_API: '0', TG_LOCAL_SERVER: 'not a URL' });
   assert.equal(disabled.status, 0, disabled.stderr);

@@ -20,13 +20,13 @@ test('writeEnvUpdates creates .env with quoted values when needed', () => {
   const envPath = tempEnv('');
   try {
     const updated = writeEnvUpdates(
-      { ZALO_MUTE_SILENT: '0', TG_LOCAL_SERVER: 'http://127.0.0.1:8081', DATA_DIR: 'my dir' },
+      { ZALO_MUTE_SILENT: '0', TG_LOCAL_SERVER: 'http://127.0.0.1:8079', DATA_DIR: 'my dir' },
       envPath,
     );
     assert.deepEqual(updated, ['ZALO_MUTE_SILENT', 'TG_LOCAL_SERVER', 'DATA_DIR']);
     assert.equal(
       readFileSync(envPath, 'utf8'),
-      'ZALO_MUTE_SILENT=0\nTG_LOCAL_SERVER=http://127.0.0.1:8081\nDATA_DIR="my dir"\n',
+      'ZALO_MUTE_SILENT=0\nTG_LOCAL_SERVER=http://127.0.0.1:8079\nDATA_DIR="my dir"\n',
     );
   } finally {
     cleanup(envPath);
