@@ -1159,6 +1159,7 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
                   msgStore.save(sent.id, buf.items[0]!.msgIds, buf.items[0]!.zaloQuote!);
                   sentMsgStore.save(sent.id, { msgIds: buf.items[0]!.msgIds, zaloId, threadType: type });
                   console.log(`[Zalo→TG] Photo sent via User-bot: topic=${buf.topicId} msgId=${sent.id}`);
+                  await cleanTemp(localPath);
                   return;
                 } catch (userErr) {
                   console.error('[Zalo→TG] User-bot sendPhoto failed, fallback to bot:', userErr);
@@ -1315,6 +1316,7 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
               caption: tgOpts.caption,
             });
             saveTgMapping(sent);
+            await cleanTemp(localPath);
             return;
           } catch (userErr) {
             console.error('[Zalo→TG] User-bot sendPhoto failed, fallback to bot:', userErr);
@@ -1385,8 +1387,10 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
               threadId: topicId,
               replyTo: tgReplyMsgId,
               caption: tgOpts.caption,
+              fileName: sanitizeFileName(fileName),
             });
             saveTgMapping(sent);
+            await cleanTemp(localPath);
             return;
           } catch (userErr) {
             console.error('[Zalo→TG] User-bot sendFile failed, fallback to bot:', userErr);
@@ -1427,6 +1431,7 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
               caption: tgOpts.caption,
             });
             saveTgMapping(sent);
+            await cleanTemp(localPath);
             return;
           } catch (userErr) {
             console.error('[Zalo→TG] User-bot sendVideo failed, fallback to bot:', userErr);
@@ -1458,11 +1463,15 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         }
         if (msg.isSelf && isUserClientReady()) {
           try {
-            const sent = await sendVoiceAsUser(localPath, {
+            const voiceFileName = `voice_${Date.now()}${ext}`;
+            const sent = await sendFileAsUser(localPath, {
               threadId: topicId,
               replyTo: tgReplyMsgId,
+              caption: tgOpts.caption,
+              fileName: voiceFileName,
             });
             saveTgMapping(sent);
+            await cleanTemp(localPath);
             return;
           } catch (userErr) {
             console.error('[Zalo→TG] User-bot sendVoice failed, fallback to bot:', userErr);
@@ -1524,6 +1533,20 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
                 Number(detail.totalFrames),
                 Number(detail.duration),
               );
+              if (msg.isSelf && isUserClientReady()) {
+                try {
+                  const sent = await sendAnimationAsUser(gifPath, {
+                    threadId: topicId,
+                    replyTo: tgReplyMsgId,
+                    caption: isGroupIncoming ? `${groupCaption(bridgeSenderName)} <i>(sticker động)</i>` : undefined,
+                  });
+                  saveTgMapping(sent);
+                  console.log(`[Zalo→TG] Animated sticker sent via User-bot: stickerId=${stickerId} msgId=${sent.id}`);
+                  return;
+                } catch (userErr) {
+                  console.error('[Zalo→TG] User-bot sendAnimation sticker failed, fallback to bot:', userErr);
+                }
+              }
               const sent = await sendAnimationWithFallback(
                 gifPath,
                 {

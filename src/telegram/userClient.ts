@@ -114,10 +114,15 @@ export async function syncTelegramTopicMute(topicId: number, isMuted: boolean): 
     }
 }
 
+function toInputFile(localPath: string): string {
+    return localPath.startsWith('file:') ? localPath : `file:${localPath}`;
+}
+
 export interface UserSendOptions {
     threadId: number;
     replyTo?: number;
     caption?: string;
+    fileName?: string;
 }
 
 export async function sendTextAsUser(
@@ -142,7 +147,7 @@ export async function sendPhotoAsUser(
     if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
     return _userClient.sendMedia(
         config.telegram.groupId,
-        InputMedia.photo(localPath, {
+        InputMedia.photo(toInputFile(localPath), {
             caption: options.caption ? html(options.caption) : undefined,
         }),
         {
@@ -158,7 +163,7 @@ export async function sendMediaGroupAsUser(
 ): Promise<Message[]> {
     if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
     const mediaList = items.map(item =>
-        InputMedia.photo(item.localPath, {
+        InputMedia.photo(toInputFile(item.localPath), {
             caption: item.caption ? html(item.caption) : undefined,
         }),
     );
@@ -179,7 +184,7 @@ export async function sendVoiceAsUser(
     if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
     return _userClient.sendMedia(
         config.telegram.groupId,
-        InputMedia.voice(localPath, {
+        InputMedia.voice(toInputFile(localPath), {
             caption: options.caption ? html(options.caption) : undefined,
         }),
         {
@@ -196,7 +201,7 @@ export async function sendAnimationAsUser(
     if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
     return _userClient.sendMedia(
         config.telegram.groupId,
-        InputMedia.animation(localPath, {
+        InputMedia.animation(toInputFile(localPath), {
             caption: options.caption ? html(options.caption) : undefined,
         }),
         {
@@ -213,7 +218,8 @@ export async function sendFileAsUser(
     if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
     return _userClient.sendMedia(
         config.telegram.groupId,
-        InputMedia.auto(localPath, {
+        InputMedia.document(toInputFile(localPath), {
+            fileName: options.fileName, // ← Nhận tên file gốc
             caption: options.caption ? html(options.caption) : undefined,
         }),
         {
