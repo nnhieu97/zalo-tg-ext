@@ -3,6 +3,7 @@ import { CloseReason, ThreadType } from 'zca-js';
 import { setupZaloHandler } from './zalo/handler.js';
 import { tgBot, syncTelegramCommands } from './telegram/bot.js';
 import { setupTelegramHandler } from './telegram/handler.js';
+import { initUserClient } from './telegram/userClient.js';
 import { config } from './config.js';
 import { startUpdateChecker } from './updater.js';
 import { store, userCache } from './store.js';
@@ -151,6 +152,13 @@ async function main(): Promise<void> {
     await startZalo(newApi, true);
   });
   _setZaloApi = setZaloApi;
+
+  // ── Launch mtcute User-bot (if configured in .env) ────────────────────────
+  try {
+    await initUserClient();
+  } catch (err) {
+    console.warn('[Boot] Khởi động User-bot thất bại (bỏ qua):', err);
+  }
 
   // ── Register bot commands for Telegram menu ───────────────────────────────
   tgBot.telegram.setMyCommands([

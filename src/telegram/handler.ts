@@ -2375,6 +2375,9 @@ export function setupTelegramHandler(
         'message_thread_id' in msg ? (msg.message_thread_id as number | undefined) : undefined;
       if (!topicId) return;
 
+      // Drop messages sent by our User-bot from Zalo to prevent echo loop
+      if (sentMsgStore.get(msg.message_id)) return;
+
       // Interactive setup wizard: consume free-form env values from chat input
       if ('text' in msg && typeof msg.text === 'string' && !msg.text.startsWith('/')) {
         if (consumeSetupTextAndAdvance(ctx.from.id, msg.text, (text, opts) =>

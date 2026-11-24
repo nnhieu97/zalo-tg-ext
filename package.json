@@ -15,6 +15,7 @@
     "security:audit": "npm audit --omit=dev"
   },
   "dependencies": {
+    "@mtcute/node": "^0.32.8",
     "@napi-rs/canvas": "^1.0.1",
     "adm-zip": "^0.5.17",
     "axios": "^1.7.2",

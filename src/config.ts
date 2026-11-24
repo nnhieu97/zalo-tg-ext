@@ -71,6 +71,9 @@ export const config = {
   telegram: {
     token:       requireEnv('TG_TOKEN'),
     groupId:     requireTelegramGroupId(),
+    apiId:       process.env.TG_API_ID ? parseInt(process.env.TG_API_ID.trim(), 10) : 0,
+    apiHash:     process.env.TG_API_HASH?.trim() || '',
+    userSessionPath: resolvePath(process.env.DATA_DIR, 'user.session'),
     /** URL của local Bot API server, ví dụ: http://localhost:8081.
      *  Chỉ dùng khi LOCAL_BOT_API=1 và TG_LOCAL_SERVER được set.
      *  Nếu không → dùng official api.telegram.org. */
