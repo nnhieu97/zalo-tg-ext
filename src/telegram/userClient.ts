@@ -1,10 +1,22 @@
 import { TelegramClient, MemoryStorage, InputMedia, html, type Message } from '@mtcute/node';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'fs';
 import path from 'path';
 import { config } from '../config.js';
 
 let _userClient: TelegramClient | null = null;
 const _topicMuteStateCache = new Map<number, boolean>();
+
+function resolveSessionFilePath(rawPath: string): string {
+    try {
+        if (existsSync(rawPath) && statSync(rawPath).isDirectory()) {
+            return path.join(rawPath, 'user.session');
+        }
+    } catch { }
+    if (path.basename(rawPath) === 'data' || !rawPath.endsWith('.session')) {
+        return path.join(rawPath, 'user.session');
+    }
+    return rawPath;
+}
 
 export function isUserClientReady(): boolean {
     return _userClient !== null;
@@ -26,10 +38,11 @@ export async function initUserClient(): Promise<TelegramClient | null> {
     }
 
     try {
+        const sessionPath = resolveSessionFilePath(config.telegram.userSessionPath);
         let savedSession: string | undefined;
-        if (existsSync(config.telegram.userSessionPath)) {
+        if (existsSync(sessionPath) && !statSync(sessionPath).isDirectory()) {
             try {
-                const content = readFileSync(config.telegram.userSessionPath, 'utf8').trim();
+                const content = readFileSync(sessionPath, 'utf8').trim();
                 if (content.length > 0) {
                     savedSession = content;
                 }
@@ -55,8 +68,8 @@ export async function initUserClient(): Promise<TelegramClient | null> {
         // Xuất và lưu String Session để các lần sau tự động đăng nhập không cần nhập lại OTP
         try {
             const exported = await client.exportSession();
-            mkdirSync(path.dirname(config.telegram.userSessionPath), { recursive: true });
-            writeFileSync(config.telegram.userSessionPath, exported, 'utf8');
+            mkdirSync(path.dirname(sessionPath), { recursive: true });
+            writeFileSync(sessionPath, exported, 'utf8');
         } catch (saveErr) {
             console.warn('[UserBot] Không thể lưu file session:', saveErr);
         }
