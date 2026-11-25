@@ -79,8 +79,8 @@ export function startUpdateChecker(bot: Telegraf): void {
         { parse_mode: 'HTML' },
       ).catch(() => undefined);
 
-      // 1. git pull (--autostash handles unstaged changes when pull.rebase=true)
-      execSync('git pull --autostash origin main', { cwd: PROJECT_ROOT, stdio: 'pipe', timeout: 120_000 });
+      // 1. git pull (--rebase --autostash handles unstaged changes regardless of pull.rebase)
+      execSync('git pull --rebase --autostash origin main', { cwd: PROJECT_ROOT, stdio: 'pipe', timeout: 120_000 });
 
       await ctx.editMessageText(
         '⏳ <b>Đang cập nhật...</b>\n\n✅ git pull\nnpm install...',

@@ -30,8 +30,8 @@ while true; do
   if [ "$EXIT_CODE" = "42" ]; then
     warn "update requested (code 42)"
     
-    warn "updating · git pull origin main"
-    git pull --autostash origin main
+    warn "updating · git pull --rebase --autostash origin main"
+    git pull --rebase --autostash origin main
     if [ $? -ne 0 ]; then
       warn "git pull failed · update aborted"
       exit 1
