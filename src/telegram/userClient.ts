@@ -1,5 +1,6 @@
-import { TelegramClient, MemoryStorage, InputMedia, html, type Message } from '@mtcute/node';
+import { TelegramClient, MemoryStorage, InputMedia, html, type Message, type UploadedFile } from '@mtcute/node';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'fs';
+import { stat } from 'fs/promises';
 import path from 'path';
 import { config } from '../config.js';
 import { sentMsgStore } from '../store.js';
@@ -59,6 +60,25 @@ export async function initUserClient(): Promise<TelegramClient | null> {
             apiId: config.telegram.apiId,
             apiHash: config.telegram.apiHash,
             storage: new MemoryStorage(),
+            network: {
+                // Keep upload connections alive 5 minutes (default 60s) to avoid
+                // repeated MTProto handshake delays on consecutive media sends.
+                inactivityTimeout: 5 * 60_000,
+                // Use 8 parallel upload sockets across DCs (default caps DC 2/4 at 4)
+                // while keeping main = 0 (recommended default).
+                connectionCount: (kind, _dcId, isPremium) => {
+                    switch (kind) {
+                        case 'main':
+                            return 0;
+                        case 'upload':
+                            return isPremium ? 12 : 8;
+                        case 'download':
+                            return isPremium ? 8 : 2;
+                        case 'downloadSmall':
+                            return 2;
+                    }
+                },
+            },
         });
 
         if (!savedSession && !process.stdin.isTTY) {
@@ -121,15 +141,40 @@ export async function syncTelegramTopicMute(topicId: number, isMuted: boolean): 
     }
 }
 
-function toInputFile(localPath: string): string {
-    return localPath.startsWith('file:') ? localPath : `file:${localPath}`;
-}
-
 export interface UserSendOptions {
     threadId: number;
     replyTo?: number;
     caption?: string;
     fileName?: string;
+}
+
+/**
+ * Upload a local file ahead of sendMedia/sendMediaGroup using larger chunks
+ * (up to 512 KB) and 4 pipelined requests per upload socket. Also runs outside
+ * trackUserBotSend so user messages in the same topic never stall waiting for uploads.
+ */
+async function uploadLocalFile(
+    client: TelegramClient,
+    localPath: string,
+    fileName?: string,
+    requirePhotoMeta = false,
+): Promise<UploadedFile> {
+    const cleanPath = localPath.startsWith('file:') ? localPath.slice(5) : localPath;
+    let partSize = 128;
+    try {
+        const { size } = await stat(cleanPath);
+        if (size >= 4 * 1024 * 1024) partSize = 512;
+        else if (size >= 1 * 1024 * 1024) partSize = 256;
+    } catch { /* fallback to 128 KB */ }
+
+    return client.uploadFile({
+        file: cleanPath,
+        fileName,
+        partSize,
+        requestsPerConnection: 4,
+        requireFileSize: requirePhotoMeta,
+        requireExtension: requirePhotoMeta,
+    });
 }
 
 async function sendSingleAsUser(
@@ -165,10 +210,14 @@ export async function sendPhotoAsUser(
     localPath: string,
     options: UserSendOptions,
 ): Promise<Message> {
+    if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
+    const base = path.basename(localPath);
+    const fileName = options.fileName ?? (path.extname(base) ? base : `${base}.jpg`);
+    const uploaded = await uploadLocalFile(_userClient, localPath, fileName, true);
     return sendSingleAsUser(options.threadId, client =>
         client.sendMedia(
             config.telegram.groupId,
-            InputMedia.photo(toInputFile(localPath), {
+            InputMedia.photo(uploaded, {
                 caption: options.caption ? html(options.caption) : undefined,
             }),
             {
@@ -185,15 +234,20 @@ export async function sendMediaGroupAsUser(
 ): Promise<Message[]> {
     if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
     const client = _userClient;
-    const mediaList = items.map(item =>
-        InputMedia.photo(toInputFile(item.localPath), {
-            caption: item.caption ? html(item.caption) : undefined,
+    const uploadedItems = await Promise.all(
+        items.map(async item => {
+            const base = path.basename(item.localPath);
+            const fileName = path.extname(base) ? base : `${base}.jpg`;
+            const uploaded = await uploadLocalFile(client, item.localPath, fileName, true);
+            return InputMedia.photo(uploaded, {
+                caption: item.caption ? html(item.caption) : undefined,
+            });
         }),
     );
     return sentMsgStore.trackUserBotSend(options.threadId, async () => {
         const sentMsgs = await client.sendMediaGroup(
             config.telegram.groupId,
-            mediaList,
+            uploadedItems,
             {
                 threadId: options.threadId,
                 replyTo: options.replyTo,
@@ -206,14 +260,42 @@ export async function sendMediaGroupAsUser(
     });
 }
 
+export async function sendVideoAsUser(
+    localPath: string,
+    options: UserSendOptions,
+): Promise<Message> {
+    if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
+    const rawExt = path.extname(localPath).toLowerCase();
+    const videoExt = rawExt && rawExt !== '.bin' ? rawExt : '.mp4';
+    const fileName = options.fileName ?? `video_${Date.now()}${videoExt}`;
+    const uploaded = await uploadLocalFile(_userClient, localPath, fileName);
+    return sendSingleAsUser(options.threadId, client =>
+        client.sendMedia(
+            config.telegram.groupId,
+            InputMedia.video(uploaded, {
+                fileName,
+                supportsStreaming: true,
+                caption: options.caption ? html(options.caption) : undefined,
+            }),
+            {
+                threadId: options.threadId,
+                replyTo: options.replyTo,
+            },
+        ),
+    );
+}
+
 export async function sendVoiceAsUser(
     localPath: string,
     options: UserSendOptions,
 ): Promise<Message> {
+    if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
+    const fileName = options.fileName ?? path.basename(localPath);
+    const uploaded = await uploadLocalFile(_userClient, localPath, fileName);
     return sendSingleAsUser(options.threadId, client =>
         client.sendMedia(
             config.telegram.groupId,
-            InputMedia.voice(toInputFile(localPath), {
+            InputMedia.voice(uploaded, {
                 caption: options.caption ? html(options.caption) : undefined,
             }),
             {
@@ -228,10 +310,14 @@ export async function sendAnimationAsUser(
     localPath: string,
     options: UserSendOptions,
 ): Promise<Message> {
+    if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
+    const fileName = options.fileName ?? path.basename(localPath);
+    const uploaded = await uploadLocalFile(_userClient, localPath, fileName);
     return sendSingleAsUser(options.threadId, client =>
         client.sendMedia(
             config.telegram.groupId,
-            InputMedia.animation(toInputFile(localPath), {
+            InputMedia.animation(uploaded, {
+                fileName,
                 caption: options.caption ? html(options.caption) : undefined,
             }),
             {
@@ -246,11 +332,14 @@ export async function sendFileAsUser(
     localPath: string,
     options: UserSendOptions,
 ): Promise<Message> {
+    if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
+    const fileName = options.fileName ?? path.basename(localPath);
+    const uploaded = await uploadLocalFile(_userClient, localPath, fileName);
     return sendSingleAsUser(options.threadId, client =>
         client.sendMedia(
             config.telegram.groupId,
-            InputMedia.document(toInputFile(localPath), {
-                fileName: options.fileName, // ← Nhận tên file gốc
+            InputMedia.document(uploaded, {
+                fileName,
                 caption: options.caption ? html(options.caption) : undefined,
             }),
             {

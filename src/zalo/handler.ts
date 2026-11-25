@@ -24,6 +24,7 @@ import {
   sendTextAsUser,
   sendPhotoAsUser,
   sendMediaGroupAsUser,
+  sendVideoAsUser,
   sendVoiceAsUser,
   sendAnimationAsUser,
   sendFileAsUser,
@@ -881,7 +882,8 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         return undefined;
       })();
       const _extGuess = _eagerMediaUrl
-        ? (path.extname(_eagerMediaUrl.split('?')[0] ?? '').toLowerCase() || '.bin')
+        ? (path.extname(_eagerMediaUrl.split('?')[0] ?? '').toLowerCase()
+          || (msgType === ZALO_MSG_TYPES.VIDEO ? '.mp4' : '.bin'))
         : '.bin';
       // Start download immediately; we'll await it inside the type-specific branch
       const earlyDlPromise = _eagerMediaUrl
@@ -1425,10 +1427,13 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         }
         if (msg.isSelf && isUserClientReady()) {
           try {
-            const sent = await sendFileAsUser(localPath, {
+            const rawExt = path.extname(localPath).toLowerCase();
+            const videoExt = rawExt && rawExt !== '.bin' ? rawExt : '.mp4';
+            const sent = await sendVideoAsUser(localPath, {
               threadId: topicId,
               replyTo: tgReplyMsgId,
               caption: tgOpts.caption,
+              fileName: `video_${Date.now()}${videoExt}`,
             });
             saveTgMapping(sent);
             await cleanTemp(localPath);
