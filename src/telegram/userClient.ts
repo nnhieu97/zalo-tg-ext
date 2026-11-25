@@ -2,8 +2,10 @@ import { TelegramClient, MemoryStorage, InputMedia, html, type Message } from '@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'fs';
 import path from 'path';
 import { config } from '../config.js';
+import { sentMsgStore } from '../store.js';
 
 let _userClient: TelegramClient | null = null;
+let _userSelfId: number | null = null;
 const _topicMuteStateCache = new Map<number, boolean>();
 
 function resolveSessionFilePath(rawPath: string): string {
@@ -24,6 +26,10 @@ export function isUserClientReady(): boolean {
 
 export function getUserClient(): TelegramClient | null {
     return _userClient;
+}
+
+export function getUserSelfId(): number | null {
+    return _userSelfId;
 }
 
 /**
@@ -75,6 +81,7 @@ export async function initUserClient(): Promise<TelegramClient | null> {
         }
 
         _userClient = client;
+        _userSelfId = user.id;
         console.log(`[UserBot] Đã đăng nhập User-bot thành công: ${user.displayName} (@${user.username || user.id})`);
         return _userClient;
     } catch (err) {
@@ -125,18 +132,32 @@ export interface UserSendOptions {
     fileName?: string;
 }
 
+async function sendSingleAsUser(
+    threadId: number,
+    fn: (client: TelegramClient) => Promise<Message>,
+): Promise<Message> {
+    if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
+    const client = _userClient;
+    return sentMsgStore.trackUserBotSend(threadId, async () => {
+        const sent = await fn(client);
+        sentMsgStore.markUserBotEcho(sent.id);
+        return sent;
+    });
+}
+
 export async function sendTextAsUser(
     text: string,
     options: UserSendOptions,
 ): Promise<Message> {
-    if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
-    return _userClient.sendText(
-        config.telegram.groupId,
-        html(text),
-        {
-            threadId: options.threadId,
-            replyTo: options.replyTo,
-        },
+    return sendSingleAsUser(options.threadId, client =>
+        client.sendText(
+            config.telegram.groupId,
+            html(text),
+            {
+                threadId: options.threadId,
+                replyTo: options.replyTo,
+            },
+        ),
     );
 }
 
@@ -144,16 +165,17 @@ export async function sendPhotoAsUser(
     localPath: string,
     options: UserSendOptions,
 ): Promise<Message> {
-    if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
-    return _userClient.sendMedia(
-        config.telegram.groupId,
-        InputMedia.photo(toInputFile(localPath), {
-            caption: options.caption ? html(options.caption) : undefined,
-        }),
-        {
-            threadId: options.threadId,
-            replyTo: options.replyTo,
-        },
+    return sendSingleAsUser(options.threadId, client =>
+        client.sendMedia(
+            config.telegram.groupId,
+            InputMedia.photo(toInputFile(localPath), {
+                caption: options.caption ? html(options.caption) : undefined,
+            }),
+            {
+                threadId: options.threadId,
+                replyTo: options.replyTo,
+            },
+        ),
     );
 }
 
@@ -162,35 +184,43 @@ export async function sendMediaGroupAsUser(
     options: UserSendOptions,
 ): Promise<Message[]> {
     if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
+    const client = _userClient;
     const mediaList = items.map(item =>
         InputMedia.photo(toInputFile(item.localPath), {
             caption: item.caption ? html(item.caption) : undefined,
         }),
     );
-    return _userClient.sendMediaGroup(
-        config.telegram.groupId,
-        mediaList,
-        {
-            threadId: options.threadId,
-            replyTo: options.replyTo,
-        },
-    );
+    return sentMsgStore.trackUserBotSend(options.threadId, async () => {
+        const sentMsgs = await client.sendMediaGroup(
+            config.telegram.groupId,
+            mediaList,
+            {
+                threadId: options.threadId,
+                replyTo: options.replyTo,
+            },
+        );
+        for (const sent of sentMsgs) {
+            sentMsgStore.markUserBotEcho(sent.id);
+        }
+        return sentMsgs;
+    });
 }
 
 export async function sendVoiceAsUser(
     localPath: string,
     options: UserSendOptions,
 ): Promise<Message> {
-    if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
-    return _userClient.sendMedia(
-        config.telegram.groupId,
-        InputMedia.voice(toInputFile(localPath), {
-            caption: options.caption ? html(options.caption) : undefined,
-        }),
-        {
-            threadId: options.threadId,
-            replyTo: options.replyTo,
-        },
+    return sendSingleAsUser(options.threadId, client =>
+        client.sendMedia(
+            config.telegram.groupId,
+            InputMedia.voice(toInputFile(localPath), {
+                caption: options.caption ? html(options.caption) : undefined,
+            }),
+            {
+                threadId: options.threadId,
+                replyTo: options.replyTo,
+            },
+        ),
     );
 }
 
@@ -198,16 +228,17 @@ export async function sendAnimationAsUser(
     localPath: string,
     options: UserSendOptions,
 ): Promise<Message> {
-    if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
-    return _userClient.sendMedia(
-        config.telegram.groupId,
-        InputMedia.animation(toInputFile(localPath), {
-            caption: options.caption ? html(options.caption) : undefined,
-        }),
-        {
-            threadId: options.threadId,
-            replyTo: options.replyTo,
-        },
+    return sendSingleAsUser(options.threadId, client =>
+        client.sendMedia(
+            config.telegram.groupId,
+            InputMedia.animation(toInputFile(localPath), {
+                caption: options.caption ? html(options.caption) : undefined,
+            }),
+            {
+                threadId: options.threadId,
+                replyTo: options.replyTo,
+            },
+        ),
     );
 }
 
@@ -215,16 +246,17 @@ export async function sendFileAsUser(
     localPath: string,
     options: UserSendOptions,
 ): Promise<Message> {
-    if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
-    return _userClient.sendMedia(
-        config.telegram.groupId,
-        InputMedia.document(toInputFile(localPath), {
-            fileName: options.fileName, // ← Nhận tên file gốc
-            caption: options.caption ? html(options.caption) : undefined,
-        }),
-        {
-            threadId: options.threadId,
-            replyTo: options.replyTo,
-        },
+    return sendSingleAsUser(options.threadId, client =>
+        client.sendMedia(
+            config.telegram.groupId,
+            InputMedia.document(toInputFile(localPath), {
+                fileName: options.fileName, // ← Nhận tên file gốc
+                caption: options.caption ? html(options.caption) : undefined,
+            }),
+            {
+                threadId: options.threadId,
+                replyTo: options.replyTo,
+            },
+        ),
     );
 }

@@ -43,6 +43,7 @@ import { store, msgStore, userCache, friendsCache, groupsCache, sentMsgStore, po
 import { getAutoReplyState, setAutoReplyEnabled, AUTO_REPLY_COOLDOWN_MIN, AUTO_REPLY_MAX_PER_HOUR } from '../zalo/autoReply.js';
 import { replayHistoryMessages, requestGroupHistory } from '../zalo/handler.js';
 import { tgBot } from './bot.js';
+import { getUserSelfId } from './userClient.js';
 import { config } from '../config.js';
 import { downloadToTemp, cleanTemp, convertStickerToPng, convertTgsToGif, convertToM4a, extractVideoThumbnail, convertWebmToGif } from '../utils/media.js';
 import { cancelActiveQRLogin, triggerQRLogin } from '../zalo/client.js';
@@ -2375,8 +2376,15 @@ export function setupTelegramHandler(
         'message_thread_id' in msg ? (msg.message_thread_id as number | undefined) : undefined;
       if (!topicId) return;
 
-      // Drop messages sent by our User-bot from Zalo to prevent echo loop
-      if (sentMsgStore.get(msg.message_id)) return;
+      // Drop messages sent by our User-bot from Zalo to prevent echo loop.
+      // Wait for any in-flight User-bot send in this topic before checking
+      // (fixes race where Bot API delivers the update before MTProto RPC returns).
+      if (sentMsgStore.isUserBotEcho(msg.message_id)) return;
+      const userSelfId = getUserSelfId();
+      if (userSelfId === null || ctx.from?.id === userSelfId) {
+        await sentMsgStore.waitForUserBotSends(topicId, msg.message_id);
+        if (sentMsgStore.isUserBotEcho(msg.message_id)) return;
+      }
 
       // Interactive setup wizard: consume free-form env values from chat input
       if ('text' in msg && typeof msg.text === 'string' && !msg.text.startsWith('/')) {

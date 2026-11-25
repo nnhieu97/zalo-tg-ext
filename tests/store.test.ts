@@ -175,6 +175,27 @@ test('sentMsgStore reference-counts concurrent in-flight sends', () => {
   assert.equal(sentMsgStore.isSendingTo('peer-concurrent'), false);
 });
 
+test('sentMsgStore tracks in-flight User-bot sends until echo ID is marked', async () => {
+  let resolveSend!: () => void;
+  const sendDone = new Promise<void>(resolve => { resolveSend = resolve; });
+
+  const tracked = sentMsgStore.trackUserBotSend(77701, async () => {
+    await sendDone;
+    sentMsgStore.markUserBotEcho(88801);
+    return 88801;
+  });
+
+  // Simulate Bot API receiving the message before MTProto RPC resolves
+  assert.equal(sentMsgStore.isUserBotEcho(88801), false);
+  const waiter = sentMsgStore.waitForUserBotSends(77701, 88801, 2000);
+
+  await new Promise(r => setTimeout(r, 20));
+  resolveSend();
+
+  await Promise.all([tracked, waiter]);
+  assert.equal(sentMsgStore.isUserBotEcho(88801), true);
+});
+
 test('reactionEchoStore consumes exactly the number of marked echoes', () => {
   reactionEchoStore.mark('g', 'm', '/-heart');
   reactionEchoStore.mark('g', 'm', '/-heart');

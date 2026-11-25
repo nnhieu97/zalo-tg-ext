@@ -784,6 +784,17 @@ const SENT_MAP_MAX = 5000;
 /** zaloId values currently being sent by the bot (to handle echo race condition) */
 const _pendingSendConvos = new Map<string, { count: number; markedAt: number }>();
 
+/**
+ * TG message IDs sent by our User-bot (kept as a fast echo filter alongside
+ * full SentMsgInfo, and updated synchronously before tracked sends resolve).
+ */
+const _userBotEchoIds = new Set<number>();
+const _userBotEchoOrder: number[] = [];
+const USERBOT_ECHO_MAX = 5000;
+
+/** Active User-bot sends keyed by Telegram topicId (prevents Bot API vs MTProto race). */
+const _pendingUserBotByTopic = new Map<number, Set<Promise<unknown>>>();
+
 export const sentMsgStore = {
   /** Record a message we sent from TG→Zalo. tgMsgId is the user's TG message. */
   save(tgMsgId: number, info: SentMsgInfo): void {
@@ -864,6 +875,57 @@ export const sentMsgStore = {
       return false;
     }
     return pending.count > 0;
+  },
+
+  markUserBotEcho(tgMsgId: number): void {
+    if (!_userBotEchoIds.has(tgMsgId)) {
+      _userBotEchoIds.add(tgMsgId);
+      _userBotEchoOrder.push(tgMsgId);
+      while (_userBotEchoOrder.length > USERBOT_ECHO_MAX) {
+        const oldest = _userBotEchoOrder.shift()!;
+        _userBotEchoIds.delete(oldest);
+      }
+    }
+  },
+
+  isUserBotEcho(tgMsgId: number): boolean {
+    return _userBotEchoIds.has(tgMsgId) || _sentMap.has(tgMsgId);
+  },
+
+  trackUserBotSend<T>(topicId: number, fn: () => Promise<T>): Promise<T> {
+    let set = _pendingUserBotByTopic.get(topicId);
+    if (!set) {
+      set = new Set();
+      _pendingUserBotByTopic.set(topicId, set);
+    }
+    let wrapped!: Promise<T>;
+    wrapped = (async () => {
+      try {
+        return await fn();
+      } finally {
+        set.delete(wrapped);
+        if (set.size === 0) _pendingUserBotByTopic.delete(topicId);
+      }
+    })();
+    set.add(wrapped);
+    return wrapped;
+  },
+
+  async waitForUserBotSends(topicId: number, tgMsgId?: number, maxWaitMs = 15_000): Promise<void> {
+    const deadline = Date.now() + maxWaitMs;
+    while (true) {
+      if (tgMsgId !== undefined && this.isUserBotEcho(tgMsgId)) return;
+      const set = _pendingUserBotByTopic.get(topicId);
+      if (!set || set.size === 0) return;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.race([...set]).catch(() => undefined),
+        new Promise<void>(resolve => { timer = setTimeout(resolve, remaining); }),
+      ]);
+      if (timer) clearTimeout(timer);
+    }
   },
 
   stats(): { entries: number } {
