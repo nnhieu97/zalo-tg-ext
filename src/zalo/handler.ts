@@ -1,4 +1,4 @@
-import { ThreadType, FriendEventType } from 'zca-js';
+import { ThreadType, FriendEventType, MuteAction, MuteDuration } from 'zca-js';
 import type { TelegramEmoji } from 'telegraf/types';
 import { createReadStream } from 'fs';
 import { pathToFileURL } from 'url';
@@ -18,6 +18,8 @@ import { applyZaloMarkupHtml, formatGroupMsgHtml, formatGroupMsg, groupCaption, 
 import type { ZaloStyle } from '../utils/format.js';
 import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, reactionEchoStore, reactionSummaryStore, reactionEventDedupeStore, aliasCache, friendsCache, recentlyRecalledMsgIds, recallNotifiedStore, type ZaloQuoteData } from '../store.js';
 import { tgQueue } from '../utils/tgQueue.js';
+import { zaloApiWithRetry } from '../utils/zaloRetry.js';
+import { getZaloMuteExpiresAt, telegramMuteToZaloSpec } from '../utils/mute.js';
 import { maybeAutoReply } from './autoReply.js';
 import {
   isUserClientReady,
@@ -29,6 +31,8 @@ import {
   sendAnimationAsUser,
   sendFileAsUser,
   syncTelegramTopicMute,
+  fetchTelegramTopicMuteStates,
+  setTelegramTopicMuteChangeHandler,
 } from '../telegram/userClient.js';
 
 // Proxy that routes every tg.* call through the rate-limit queue
@@ -227,56 +231,75 @@ interface ZaloMuteEntry {
   currentTime?: number;
 }
 
-const MUTED_GROUPS_TTL = 60 * 1000; // 1 min
-let _mutedCache: { groups: Set<string>; peers: Set<string>; ts: number } | null = null;
+const MUTED_GROUPS_TTL = 5 * 1000; // 5 s — short TTL so Zalo unmute/mute takes effect quickly while bursting albums stay cached
+let _mutedCache: { groups: Map<string, number>; peers: Map<string, number>; ts: number } | null = null;
 
-function isActiveMute(entry: ZaloMuteEntry): boolean {
-  if (entry.duration === -1) return true;
-  if (entry.duration <= 0) return false;
-
-  const now = entry.currentTime ?? entry.systemTime ?? Math.floor(Date.now() / 1000);
-  const expiresAt = entry.startTime + entry.duration;
-  return now < expiresAt;
+async function fetchMutedZaloState(
+  api: ZaloAPI,
+): Promise<{ groups: Map<string, number>; peers: Map<string, number> }> {
+  const muteInfo = await zaloApiWithRetry(api).getMute() as {
+    groupChatEntries?: ZaloMuteEntry[];
+    chatEntries?: ZaloMuteEntry[];
+  };
+  const nowSec = Math.floor(Date.now() / 1000);
+  const toMap = (entries?: ZaloMuteEntry[]) => {
+    const map = new Map<string, number>();
+    for (const e of entries ?? []) {
+      const expiresAt = getZaloMuteExpiresAt(e, nowSec);
+      if (expiresAt > 0) map.set(String(e.id), expiresAt);
+    }
+    return map;
+  };
+  const state = {
+    groups: toMap(muteInfo.groupChatEntries),
+    peers:  toMap(muteInfo.chatEntries),
+    ts: Date.now(),
+  };
+  _mutedCache = state;
+  return state;
 }
 
 /**
- * Currently-muted Zalo thread ids, split into groups and DM peers, cached for a
- * minute. getMute() returns `groupChatEntries` (groups) and `chatEntries` (DMs).
+ * Currently-muted Zalo thread ids → Telegram-compatible muteUntil timestamp,
+ * cached for a minute. getMute() returns `groupChatEntries` (groups) and
+ * `chatEntries` (DMs).
  */
-async function getMutedZaloIds(api: ZaloAPI): Promise<{ groups: Set<string>; peers: Set<string> }> {
+async function getMutedZaloState(
+  api: ZaloAPI,
+): Promise<{ groups: Map<string, number>; peers: Map<string, number> }> {
   const cached = _mutedCache;
   if (cached && Date.now() - cached.ts < MUTED_GROUPS_TTL) return cached;
 
   try {
-    const muteInfo = await api.getMute() as {
-      groupChatEntries?: ZaloMuteEntry[];
-      chatEntries?: ZaloMuteEntry[];
-    };
-    const groups = new Set((muteInfo.groupChatEntries ?? []).filter(isActiveMute).map(e => String(e.id)));
-    const peers  = new Set((muteInfo.chatEntries ?? []).filter(isActiveMute).map(e => String(e.id)));
-    _mutedCache = { groups, peers, ts: Date.now() };
-    return _mutedCache;
+    return await fetchMutedZaloState(api);
   } catch (err) {
     console.warn('[Zalo→TG] Failed to fetch Zalo mute state:', err);
-    return { groups: new Set(), peers: new Set() };
+    return { groups: new Map(), peers: new Map() };
   }
 }
 
 /** Skip-muted-groups behavior (opt-in): drop messages from muted Zalo groups. */
 async function isMutedZaloGroup(api: ZaloAPI, groupId: string): Promise<boolean> {
   if (!config.zalo.skipMutedGroups) return false;
-  return (await getMutedZaloIds(api)).groups.has(groupId);
+  return (await getMutedZaloState(api)).groups.has(groupId);
 }
 
 /**
- * Mirror Zalo's "mute notifications" onto Telegram: a thread muted on Zalo is
- * delivered silently (disable_notification) — the message still arrives, it just
- * doesn't ping. Covers both groups and DMs.
+ * Return Telegram-compatible muteUntil timestamp for a Zalo thread (0 = not muted),
+ * respecting timed mutes and ZALO_MUTE_SILENT.
  */
-async function isMutedOnZalo(api: ZaloAPI, threadId: string, type: 0 | 1): Promise<boolean> {
-  if (!config.zalo.muteSilentMirror) return false;
-  const { groups, peers } = await getMutedZaloIds(api);
-  return type === 1 ? groups.has(threadId) : peers.has(threadId);
+async function getZaloMuteUntilForThread(
+  api: ZaloAPI,
+  threadId: string,
+  type: 0 | 1,
+): Promise<number> {
+  if (!config.zalo.muteSilentMirror) return 0;
+  const { groups, peers } = await getMutedZaloState(api);
+  const rawMuteUntil = (type === 1 ? groups : peers).get(threadId) ?? 0;
+  if (rawMuteUntil <= 0) return 0;
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (rawMuteUntil < 2_000_000_000 && rawMuteUntil <= nowSec) return 0;
+  return rawMuteUntil;
 }
 
 // In-flight topic creation promises — prevents duplicate topic creation when
@@ -854,7 +877,8 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
 
       // Mirror Zalo's mute → deliver this thread silently on Telegram. Computed
       // once here (before any message-type branch) so every send path can use it.
-      const silent = await isMutedOnZalo(api, zaloId, type);
+      const zaloMuteUntil = await getZaloMuteUntilForThread(api, zaloId, type);
+      const silent = zaloMuteUntil > 0;
 
       // Pre-populate member cache the first time we see a new group
       if (type === 1 && !_memberCacheLoaded.has(zaloId)) {
@@ -973,7 +997,7 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         tgBase.reply_parameters = { message_id: tgReplyMsgId, allow_sending_without_reply: true };
       }
       if (silent) tgBase.disable_notification = true;
-      void syncTelegramTopicMute(topicId, silent);
+      void syncTelegramTopicMute(topicId, zaloMuteUntil);
 
       const isGroupIncoming = type === ThreadType.Group && !msg.isSelf;
       const caption = isGroupIncoming ? groupCaption(bridgeSenderName) : '';
@@ -2781,4 +2805,66 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
       }
     }
   });
+
+  // ── Đồng bộ mute 2 chiều: Telegram → Zalo (realtime) ───────────────────────
+  setTelegramTopicMuteChangeHandler(async ({ topicId, isMuted, muteUntil }) => {
+    const entry = store.getEntryByTopic(topicId);
+    if (!entry) return;
+
+    const spec = telegramMuteToZaloSpec(isMuted, muteUntil);
+    const threadType = entry.type === 1 ? ThreadType.Group : ThreadType.User;
+    try {
+      await zaloApiWithRetry(api).setMute(
+        {
+          action: spec.action === 'mute' ? MuteAction.MUTE : MuteAction.UNMUTE,
+          duration: spec.action === 'mute' ? spec.duration : MuteDuration.FOREVER,
+        },
+        entry.zaloId,
+        threadType,
+      );
+      // Xoá cache mute Zalo để tin nhắn kế tiếp đọc trạng thái mới nhất
+      _mutedCache = null;
+      const label = spec.action === 'unmute'
+        ? 'UNMUTED'
+        : (spec.duration === -1 ? 'MUTED (forever)' : `MUTED (${spec.duration}s)`);
+      console.log(`[TG→Zalo] Đồng bộ mute topic ${topicId} (${entry.name}): ${label}`);
+    } catch (err) {
+      console.warn(`[TG→Zalo] Lỗi đồng bộ mute topic ${topicId} (${entry.name}):`, err);
+    }
+  });
+
+  // ── Đồng bộ mute lúc khởi động / reconnect: 1 chiều Zalo → Telegram ────────
+  void (async () => {
+    if (!config.zalo.muteSilentMirror || !isUserClientReady()) return;
+    const entries = store.all();
+    if (entries.length === 0) return;
+
+    let zaloMutes: { groups: Map<string, number>; peers: Map<string, number> };
+    try {
+      zaloMutes = await fetchMutedZaloState(api);
+    } catch (err) {
+      console.warn('[MuteSync] Không thể đọc trạng thái mute Zalo lúc khởi động, bỏ qua:', err);
+      return;
+    }
+
+    const tgMutes = await fetchTelegramTopicMuteStates(entries.map(e => e.topicId));
+    let syncedCount = 0;
+
+    for (const entry of entries) {
+      if (!tgMutes.has(entry.topicId)) continue;
+      const targetMuteUntil = entry.type === 1
+        ? (zaloMutes.groups.get(entry.zaloId) ?? 0)
+        : (zaloMutes.peers.get(entry.zaloId) ?? 0);
+
+      const changed = await syncTelegramTopicMute(entry.topicId, targetMuteUntil);
+      if (changed) {
+        syncedCount++;
+        await new Promise(r => setTimeout(r, 150));
+      }
+    }
+
+    if (syncedCount > 0) {
+      console.log(`[MuteSync] Đã đồng bộ mute ${syncedCount}/${tgMutes.size} topic từ Zalo sang Telegram lúc khởi động.`);
+    }
+  })();
 }

@@ -1,13 +1,43 @@
-import { TelegramClient, MemoryStorage, InputMedia, html, type Message, type UploadedFile } from '@mtcute/node';
+import {
+    TelegramClient,
+    MemoryStorage,
+    InputMedia,
+    html,
+    getMarkedPeerId,
+    type Message,
+    type UploadedFile,
+    type tl,
+} from '@mtcute/node';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'fs';
 import { stat } from 'fs/promises';
 import path from 'path';
 import { config } from '../config.js';
 import { sentMsgStore } from '../store.js';
+import {
+    isSameMuteState,
+    normalizePeerNotifyMute,
+    normalizeTargetMuteUntil,
+} from '../utils/mute.js';
 
 let _userClient: TelegramClient | null = null;
 let _userSelfId: number | null = null;
-const _topicMuteStateCache = new Map<number, boolean>();
+let _groupInputPeer: tl.TypeInputPeer | null = null;
+const _topicMuteUntilCache = new Map<number, number>();
+const _selfMuteEchoSuppress = new Map<number, { isMuted: boolean; untilMs: number }>();
+
+export interface TelegramTopicMuteEvent {
+    topicId: number;
+    isMuted: boolean;
+    muteUntil: number;
+}
+
+let _topicMuteChangeHandler: ((event: TelegramTopicMuteEvent) => void | Promise<void>) | null = null;
+
+export function setTelegramTopicMuteChangeHandler(
+    handler: ((event: TelegramTopicMuteEvent) => void | Promise<void>) | null,
+): void {
+    _topicMuteChangeHandler = handler;
+}
 
 function resolveSessionFilePath(rawPath: string): string {
     try {
@@ -102,6 +132,42 @@ export async function initUserClient(): Promise<TelegramClient | null> {
 
         _userClient = client;
         _userSelfId = user.id;
+        _groupInputPeer = null;
+
+        // Lắng nghe thay đổi mute từ Telegram (chỉ bắt các topic thuộc supergroup bridge)
+        client.onRawUpdate.add(({ update }) => {
+            if (update._ !== 'updateNotifySettings') return;
+            if (update.peer._ !== 'notifyForumTopic') return;
+            if (getMarkedPeerId(update.peer.peer) !== config.telegram.groupId) return;
+
+            const topicId = update.peer.topMsgId;
+            const normalized = normalizePeerNotifyMute(update.notifySettings);
+
+            const suppress = _selfMuteEchoSuppress.get(topicId);
+            if (suppress && Date.now() < suppress.untilMs && suppress.isMuted === normalized.isMuted) {
+                _topicMuteUntilCache.set(topicId, normalized.muteUntil);
+                return;
+            }
+
+            // Dedupe identical/replayed updateNotifySettings packets (Telegram often
+            // delivers duplicate updates immediately and/or re-emits during sync).
+            const prevMuteUntil = _topicMuteUntilCache.get(topicId);
+            if (prevMuteUntil !== undefined && isSameMuteState(prevMuteUntil, normalized.muteUntil)) {
+                return;
+            }
+
+            _topicMuteUntilCache.set(topicId, normalized.muteUntil);
+            if (_topicMuteChangeHandler) {
+                void Promise.resolve(_topicMuteChangeHandler({
+                    topicId,
+                    isMuted: normalized.isMuted,
+                    muteUntil: normalized.muteUntil,
+                })).catch(err => {
+                    console.warn(`[UserBot] Lỗi xử lý mute từ Telegram cho topic ${topicId}:`, err);
+                });
+            }
+        });
+
         console.log(`[UserBot] Đã đăng nhập User-bot thành công: ${user.displayName} (@${user.username || user.id})`);
         return _userClient;
     } catch (err) {
@@ -110,18 +176,73 @@ export async function initUserClient(): Promise<TelegramClient | null> {
     }
 }
 
+async function getGroupInputPeer(): Promise<tl.TypeInputPeer> {
+    if (!_userClient) throw new Error('User-bot client chưa sẵn sàng');
+    if (!_groupInputPeer) {
+        _groupInputPeer = await _userClient.resolvePeer(config.telegram.groupId);
+    }
+    return _groupInputPeer;
+}
+
+/**
+ * Đọc trạng thái mute hiện tại của các forum topic trên Telegram theo batch (tối đa 100/lần)
+ * để tránh gọi account.updateNotifySettings dư thừa khi khởi động.
+ */
+export async function fetchTelegramTopicMuteStates(topicIds: number[]): Promise<Map<number, number>> {
+    const result = new Map<number, number>();
+    if (!_userClient || topicIds.length === 0) return result;
+
+    const peer = await getGroupInputPeer();
+    const nowSec = Math.floor(Date.now() / 1000);
+    const BATCH_SIZE = 100;
+
+    for (let i = 0; i < topicIds.length; i += BATCH_SIZE) {
+        const batch = topicIds.slice(i, i + BATCH_SIZE);
+        try {
+            const resp = await _userClient.call({
+                _: 'messages.getForumTopicsByID',
+                peer,
+                topics: batch,
+            });
+            for (const topic of resp.topics) {
+                if (topic._ !== 'forumTopic') continue;
+                const { muteUntil } = normalizePeerNotifyMute(topic.notifySettings, nowSec);
+                result.set(topic.id, muteUntil);
+                _topicMuteUntilCache.set(topic.id, muteUntil);
+            }
+        } catch (err) {
+            console.warn('[UserBot] Lỗi đọc danh sách trạng thái mute topic:', err);
+        }
+    }
+
+    return result;
+}
+
 /**
  * Đồng bộ trạng thái mute của 1 topic trên Telegram theo Zalo thời gian thực.
- * Sử dụng MTProto TL method: account.updateNotifySettings
+ * Hỗ trợ cả boolean và mốc muteUntil (Unix timestamp giây; >= 2e9 = vĩnh viễn).
+ * Trả về true nếu thực sự có gọi API cập nhật lên Telegram.
  */
-export async function syncTelegramTopicMute(topicId: number, isMuted: boolean): Promise<void> {
-    if (!_userClient) return;
+export async function syncTelegramTopicMute(
+    topicId: number,
+    muteUntilOrFlag: boolean | number,
+): Promise<boolean> {
+    if (!_userClient) return false;
 
-    const current = _topicMuteStateCache.get(topicId);
-    if (current === isMuted) return;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const targetMuteUntil = normalizeTargetMuteUntil(muteUntilOrFlag, nowSec);
+    const cached = _topicMuteUntilCache.get(topicId);
+    if (cached !== undefined && isSameMuteState(cached, targetMuteUntil, nowSec)) {
+        return false;
+    }
+
+    const isMuted = targetMuteUntil > 0;
+    const prevCached = cached;
+    _selfMuteEchoSuppress.set(topicId, { isMuted, untilMs: Date.now() + 10_000 });
+    _topicMuteUntilCache.set(topicId, targetMuteUntil);
 
     try {
-        const peer = await _userClient.resolvePeer(config.telegram.groupId);
+        const peer = await getGroupInputPeer();
         await _userClient.call({
             _: 'account.updateNotifySettings',
             peer: {
@@ -129,15 +250,26 @@ export async function syncTelegramTopicMute(topicId: number, isMuted: boolean): 
                 peer,
                 topMsgId: topicId,
             },
-            settings: {
-                _: 'inputPeerNotifySettings',
-                muteUntil: isMuted ? 2147483647 : 0,
-            },
+            settings: targetMuteUntil === 0
+                ? { _: 'inputPeerNotifySettings', silent: false, muteUntil: 0 }
+                : targetMuteUntil >= 2_000_000_000
+                    ? { _: 'inputPeerNotifySettings', silent: true, muteUntil: targetMuteUntil }
+                    : { _: 'inputPeerNotifySettings', muteUntil: targetMuteUntil },
         });
-        _topicMuteStateCache.set(topicId, isMuted);
-        console.log(`[UserBot] Đồng bộ mute topic ${topicId}: ${isMuted ? 'MUTED' : 'UNMUTED'}`);
+        const label = targetMuteUntil === 0
+            ? 'UNMUTED'
+            : (targetMuteUntil >= 2_000_000_000 ? 'MUTED (forever)' : `MUTED until ${targetMuteUntil}`);
+        console.log(`[UserBot] Đồng bộ mute topic ${topicId}: ${label}`);
+        return true;
     } catch (err) {
+        _selfMuteEchoSuppress.delete(topicId);
+        if (prevCached === undefined) {
+            _topicMuteUntilCache.delete(topicId);
+        } else {
+            _topicMuteUntilCache.set(topicId, prevCached);
+        }
         console.warn(`[UserBot] Lỗi đồng bộ mute topic ${topicId}:`, err);
+        return false;
     }
 }
 
