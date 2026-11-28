@@ -20,8 +20,10 @@ const {
   reactionSummaryStore,
   recallNotifiedStore,
   sentMsgStore,
+  setOnTopicsPersisted,
   store,
   userCache,
+  validateTopicsJson,
 } = await import('../src/store.js');
 
 type Quote = Parameters<typeof msgStore.save>[2];
@@ -293,4 +295,41 @@ test('debounced msgStore persistence writes a gzip payload', async () => {
   const data = await readFile(path.join(config.dataDir, 'msg-map.json'));
   assert.equal(data[0], 0x1f);
   assert.equal(data[1], 0x8b);
+});
+
+test('validateTopicsJson and store.restoreFromJson verify backup integrity and update memory without notify loop', async () => {
+  assert.equal(validateTopicsJson('not-json'), null);
+  assert.equal(validateTopicsJson(JSON.stringify({ topics: {}, zaloIndex: {} })), null);
+  assert.equal(validateTopicsJson(JSON.stringify({ topics: { '10': { topicId: 10, zaloId: '', type: 0, name: 'x' } }, zaloIndex: {} })), null);
+
+  let notifyCount = 0;
+  setOnTopicsPersisted(() => { notifyCount++; });
+  try {
+    store.set({ topicId: 9701, zaloId: 'z-9701', type: 0, name: 'Before Restore' });
+    assert.equal(notifyCount, 1);
+
+    const backupPayload = JSON.stringify({
+      topics: {
+        '9801': { topicId: 9801, zaloId: 'u-9801', type: 0, name: 'Alice' },
+        '9802': { topicId: 9802, zaloId: 'g-9802', type: 1, name: 'Work Group' },
+      },
+      zaloIndex: {
+        '0:u-9801': 9801,
+        '1:g-9802': 9802,
+      },
+    });
+
+    assert.equal(store.restoreFromJson(backupPayload), true);
+    assert.equal(notifyCount, 1); // restoreFromJson must not trigger backup hook
+    assert.equal(store.getTopicByZalo('u-9801', 0), 9801);
+    assert.equal(store.getEntryByTopic(9802)?.name, 'Work Group');
+    assert.equal(store.getTopicByZalo('z-9701', 0), undefined);
+
+    const onDisk = JSON.parse(await readFile(path.join(config.dataDir, 'topics.json'), 'utf8')) as {
+      topics: Record<string, unknown>;
+    };
+    assert.equal(Object.keys(onDisk.topics).length, 2);
+  } finally {
+    setOnTopicsPersisted(null);
+  }
 });

@@ -73,11 +73,67 @@ function load(): StoreData {
   }
 }
 
-function persist(data: StoreData): void {
+let _onTopicsPersisted: (() => void) | null = null;
+
+export function setOnTopicsPersisted(cb: (() => void) | null): void {
+  _onTopicsPersisted = cb;
+}
+
+export function getTopicsFilePath(): string {
+  return filePath;
+}
+
+export function validateTopicsJson(rawJson: string): StoreData | null {
+  try {
+    const parsed = JSON.parse(rawJson) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const obj = parsed as Record<string, unknown>;
+    if (!obj.topics || typeof obj.topics !== 'object' || Array.isArray(obj.topics)) return null;
+    if (!obj.zaloIndex || typeof obj.zaloIndex !== 'object' || Array.isArray(obj.zaloIndex)) return null;
+
+    const rawTopics = obj.topics as Record<string, unknown>;
+    const topicKeys = Object.keys(rawTopics);
+    if (topicKeys.length === 0) return null;
+
+    const topics: Record<string, TopicEntry> = {};
+    const zaloIndex: Record<string, number> = {};
+
+    for (const [key, val] of Object.entries(rawTopics)) {
+      if (!val || typeof val !== 'object' || Array.isArray(val)) return null;
+      const entry = val as Record<string, unknown>;
+      if (
+        typeof entry.topicId !== 'number'
+        || !Number.isSafeInteger(entry.topicId)
+        || entry.topicId <= 0
+        || String(entry.topicId) !== key
+        || typeof entry.zaloId !== 'string'
+        || entry.zaloId.length === 0
+        || (entry.type !== 0 && entry.type !== 1)
+        || typeof entry.name !== 'string'
+      ) {
+        return null;
+      }
+      topics[key] = {
+        topicId: entry.topicId,
+        zaloId: entry.zaloId,
+        type: entry.type,
+        name: entry.name,
+      };
+      zaloIndex[zaloKey(entry.zaloId, entry.type)] = entry.topicId;
+    }
+
+    return { topics, zaloIndex };
+  } catch {
+    return null;
+  }
+}
+
+function persist(data: StoreData, notify = true): void {
   mkdirSync(path.dirname(filePath), { recursive: true });
   const tmpPath = filePath + '.tmp';
   writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf8');
   renameSync(tmpPath, filePath);
+  if (notify) _onTopicsPersisted?.();
 }
 
 function zaloKey(zaloId: string, type: 0 | 1): string {
@@ -148,6 +204,15 @@ export const store = {
     }
     persist(_data);
     return entry;
+  },
+
+  /** Validate JSON backup, persist atomically to disk, and refresh in-memory store. */
+  restoreFromJson(rawJson: string): boolean {
+    const validated = validateTopicsJson(rawJson);
+    if (!validated) return false;
+    _data = validated;
+    persist(_data, false);
+    return true;
   },
 
   /** Re-read from disk (useful after external edits). */

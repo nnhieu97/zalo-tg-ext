@@ -219,6 +219,50 @@ export async function fetchTelegramTopicMuteStates(topicIds: number[]): Promise<
 }
 
 /**
+ * Tìm file document mới nhất trong supergroup khớp chính xác tên file.
+ * Trả về Buffer nội dung file nếu tìm thấy, ngược lại null.
+ */
+export async function findLatestDocumentByName(fileName: string): Promise<Buffer | null> {
+    if (!_userClient || !fileName) return null;
+
+    const extractLatestMatch = (msgs: Message[]): Message | undefined => {
+        const matches = msgs.filter(
+            m => m.media?.type === 'document' && m.media.fileName === fileName,
+        );
+        if (matches.length === 0) return undefined;
+        matches.sort((a, b) => b.id - a.id);
+        return matches[0];
+    };
+
+    try {
+        const searched = await _userClient.searchMessages({
+            chatId: config.telegram.groupId,
+            query: fileName,
+            filter: { _: 'inputMessagesFilterDocument' },
+            limit: 50,
+        });
+        let matched = extractLatestMatch(searched);
+
+        // Fallback quét 100 document gần nhất phòng trường hợp ký tự '+' khiến search text bị lệch
+        if (!matched) {
+            const recentDocs = await _userClient.searchMessages({
+                chatId: config.telegram.groupId,
+                filter: { _: 'inputMessagesFilterDocument' },
+                limit: 100,
+            });
+            matched = extractLatestMatch(recentDocs);
+        }
+
+        if (!matched || matched.media?.type !== 'document') return null;
+        const bytes = await _userClient.downloadAsBuffer(matched.media);
+        return Buffer.from(bytes);
+    } catch (err) {
+        console.warn(`[UserBot] Lỗi tìm file backup "${fileName}":`, err);
+        return null;
+    }
+}
+
+/**
  * Đồng bộ trạng thái mute của 1 topic trên Telegram theo Zalo thời gian thực.
  * Hỗ trợ cả boolean và mốc muteUntil (Unix timestamp giây; >= 2e9 = vĩnh viễn).
  * Trả về true nếu thực sự có gọi API cập nhật lên Telegram.

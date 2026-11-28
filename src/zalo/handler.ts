@@ -21,6 +21,7 @@ import { tgQueue } from '../utils/tgQueue.js';
 import { zaloApiWithRetry } from '../utils/zaloRetry.js';
 import { getZaloMuteExpiresAt, telegramMuteToZaloSpec } from '../utils/mute.js';
 import { maybeAutoReply } from './autoReply.js';
+import { initTopicsBackupAndRestore } from './topicsBackup.js';
 import {
   isUserClientReady,
   sendTextAsUser,
@@ -2834,7 +2835,7 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
   });
 
   // ── Đồng bộ mute lúc khởi động / reconnect: 1 chiều Zalo → Telegram ────────
-  void (async () => {
+  const runStartupMuteSync = async () => {
     if (!config.zalo.muteSilentMirror || !isUserClientReady()) return;
     const entries = store.all();
     if (entries.length === 0) return;
@@ -2866,5 +2867,8 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
     if (syncedCount > 0) {
       console.log(`[MuteSync] Đã đồng bộ mute ${syncedCount}/${tgMutes.size} topic từ Zalo sang Telegram lúc khởi động.`);
     }
-  })();
+  };
+
+  void runStartupMuteSync();
+  void initTopicsBackupAndRestore(api, () => { void runStartupMuteSync(); });
 }

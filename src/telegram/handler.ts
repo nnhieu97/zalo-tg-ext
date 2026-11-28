@@ -55,6 +55,7 @@ import { zaloApiWithRetry, isTransientNetworkError } from '../utils/zaloRetry.js
 import { tgQueue } from '../utils/tgQueue.js';
 import { requestShutdown } from '../lifecycle.js';
 import { startSetupWizard, handleSetupCallback, hasActiveSetup, consumeSetupTextAndAdvance } from './setupWizard.js';
+import { handleTopicsRestoreCallback } from '../zalo/topicsBackup.js';
 
 // Bridge start time (module load = process start)
 const _bridgeStartTime = Date.now();
@@ -1675,6 +1676,11 @@ export function setupTelegramHandler(
         ...opts,
       });
       await handleSetupCallback(ctx, data, isTelegramGroupAdmin, send);
+      return;
+    }
+
+    if (data?.startsWith('topics_restore:')) {
+      await handleTopicsRestoreCallback(ctx, data, isTelegramGroupAdmin);
       return;
     }
 
