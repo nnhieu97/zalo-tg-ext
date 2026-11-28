@@ -200,7 +200,12 @@ export async function initTopicsBackupAndRestore(
 
   const topicsPath = getTopicsFilePath();
   const hasTopics = existsSync(topicsPath) && store.all().length > 0;
-  if (hasTopics) return;
+  if (hasTopics) {
+    // Đẩy/đối chiếu bản backup ngay lúc khởi động (hữu ích khi mới nâng cấp
+    // từ bản chưa có topics-backup.json hoặc tin backup trên TG bị xoá)
+    enqueueTopicsBackup(api);
+    return;
+  }
 
   try {
     await tgQueue(() =>
